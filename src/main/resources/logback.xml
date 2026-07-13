@@ -1,0 +1,23 @@
+<configuration>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Our application code — INFO and above -->
+    <logger name="producer" level="INFO"/>
+    <logger name="streams" level="INFO"/>
+    <logger name="api" level="INFO"/>
+
+    <!-- Kafka internals — WARN only (suppress verbose connection/fetch DEBUG logs) -->
+    <logger name="org.apache.kafka" level="WARN"/>
+    <logger name="kafka" level="WARN"/>
+
+    <!-- Ktor — WARN only -->
+    <logger name="io.ktor" level="WARN"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>

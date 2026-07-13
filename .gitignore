@@ -1,0 +1,22 @@
+# Gradle
+.gradle/
+build/
+
+# Gradle wrapper binaries ARE intentionally tracked (needed for CI and contributors)
+# gradlew, gradlew.bat, gradle/wrapper/ — do NOT add these to .gitignore
+
+# IntelliJ / IDE
+.idea/
+*.iml
+*.iws
+out/
+
+# Environment
+.env
+
+# Kafka Streams local state stores
+/tmp/kafka-streams/
+
+# OS
+.DS_Store
+Thumbs.db
