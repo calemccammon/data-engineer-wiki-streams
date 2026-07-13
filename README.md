@@ -4,6 +4,8 @@
 
 **Data flows:** Wikimedia SSE → Kafka (Redpanda) → Kafka Streams (Kotlin) → Ktor REST API
 
+📖 **[API Documentation (Swagger UI)](https://calemccammon.github.io/data-engineer-wiki-streams/)**
+
 ---
 
 ## What This Project Demonstrates

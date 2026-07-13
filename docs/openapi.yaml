@@ -1,0 +1,332 @@
+openapi: 3.0.3
+
+info:
+  title: Wikipedia Streams API
+  description: |
+    Real-time analytics API for the Wikipedia Streams data engineering pipeline.
+
+    **Data flow:** Wikimedia SSE → Kafka (Redpanda) → Kafka Streams → this API
+
+    All endpoints query **in-process RocksDB state stores** directly — no database round-trip,
+    no Kafka read. Results reflect the latest state as of the most recently processed edit.
+
+    The pipeline ingests ~1000 Wikipedia edits per minute across all languages from the
+    [Wikimedia EventStreams](https://stream.wikimedia.org/) public SSE feed.
+
+    > **Note:** The pipeline must be running locally (`./gradlew run`) for the API to respond.
+    > State stores are not available until Kafka Streams reaches `RUNNING` state (~15 seconds after startup).
+  version: 1.0.0
+  contact:
+    name: Source Code
+    url: https://github.com/calemccammon/data-engineer-wiki-streams
+
+servers:
+  - url: http://localhost:8090
+    description: Local development
+
+tags:
+  - name: pipeline
+    description: Pipeline health and status
+  - name: analytics
+    description: Real-time Wikipedia edit analytics
+
+paths:
+
+  /api/health:
+    get:
+      tags: [pipeline]
+      summary: Pipeline health check
+      description: |
+        Returns the liveness status of the Kafka Streams processor.
+
+        `streamsState` reflects the internal Kafka Streams state machine:
+        - `CREATED` — initializing
+        - `REBALANCING` — assigning partitions (normal on startup)
+        - `RUNNING` — fully operational, all state stores queryable
+        - `PENDING_SHUTDOWN` / `NOT_RUNNING` — shutting down or stopped
+      operationId: getHealth
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                running:
+                  summary: Fully operational
+                  value:
+                    status: ok
+                    streamsState: RUNNING
+                rebalancing:
+                  summary: Starting up
+                  value:
+                    status: ok
+                    streamsState: REBALANCING
+
+  /api/stats:
+    get:
+      tags: [analytics]
+      summary: Edit counts across all wikis
+      description: |
+        Returns edit counts per wiki from the **1-minute tumbling window** state store,
+        covering the last 2 minutes. Results are sorted by edit count descending.
+
+        **Tumbling windows** are non-overlapping time buckets. Each edit belongs to
+        exactly one window (e.g. an edit at 10:00:45 goes into `[10:00, 10:01)`).
+
+        `wikidatawiki` typically dominates due to high bot activity.
+      operationId: getAllStats
+      responses:
+        '200':
+          description: Edit counts per wiki per minute, sorted by count descending
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EditCountResponse'
+              example:
+                - wiki: wikidatawiki
+                  windowStartIso: "2026-07-13T00:29:00Z"
+                  windowEndIso: "2026-07-13T00:30:00Z"
+                  editCount: 263
+                - wiki: enwiki
+                  windowStartIso: "2026-07-13T00:29:00Z"
+                  windowEndIso: "2026-07-13T00:30:00Z"
+                  editCount: 62
+        '503':
+          $ref: '#/components/responses/StoreNotReady'
+
+  /api/stats/{wiki}:
+    get:
+      tags: [analytics]
+      summary: Edit counts for a specific wiki
+      description: |
+        Returns the per-minute edit count history for a single wiki over the last 5 minutes.
+
+        Common wiki identifiers: `enwiki`, `dewiki`, `frwiki`, `jawiki`, `eswiki`,
+        `ptwiki`, `ruwiki`, `wikidatawiki`, `commonswiki`.
+      operationId: getStatsByWiki
+      parameters:
+        - name: wiki
+          in: path
+          required: true
+          description: Wiki database name (e.g. `enwiki`, `wikidatawiki`)
+          schema:
+            type: string
+            example: enwiki
+      responses:
+        '200':
+          description: Per-minute edit counts for the requested wiki
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EditCountResponse'
+              example:
+                - wiki: enwiki
+                  windowStartIso: "2026-07-13T00:28:00Z"
+                  windowEndIso: "2026-07-13T00:29:00Z"
+                  editCount: 58
+                - wiki: enwiki
+                  windowStartIso: "2026-07-13T00:29:00Z"
+                  windowEndIso: "2026-07-13T00:30:00Z"
+                  editCount: 62
+        '400':
+          description: Missing wiki parameter
+        '503':
+          $ref: '#/components/responses/StoreNotReady'
+
+  /api/hot-pages:
+    get:
+      tags: [analytics]
+      summary: Most-edited articles in the last 5 minutes
+      description: |
+        Returns the top N most-edited article pages across all wikis, using a
+        **5-minute hopping window** that advances every 1 minute.
+
+        **Hopping windows** are overlapping: an edit at 10:00:45 appears in 5 windows
+        (`[09:56,10:01)`, `[09:57,10:02)`, ..., `[10:00,10:05)`). This gives a smooth
+        "rolling" view of which pages are hot *right now*.
+
+        Results are deduplicated to the highest-count window per page and sorted
+        by edit count descending.
+      operationId: getHotPages
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of results to return (default 20)
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Most-edited pages in the last 5 minutes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HotPageResponse'
+              example:
+                - wiki: wikidatawiki
+                  title: Q26208350
+                  editCount: 8
+                  windowStartIso: "2026-07-13T00:25:00Z"
+                  windowEndIso: "2026-07-13T00:30:00Z"
+                - wiki: enwiki
+                  title: 2026 FIFA World Cup
+                  editCount: 4
+                  windowStartIso: "2026-07-13T00:25:00Z"
+                  windowEndIso: "2026-07-13T00:30:00Z"
+        '503':
+          $ref: '#/components/responses/StoreNotReady'
+
+  /api/bot-ratio:
+    get:
+      tags: [analytics]
+      summary: Bot vs human edit ratio per wiki
+      description: |
+        Returns the **cumulative** bot vs human edit breakdown for every wiki seen
+        since the pipeline started. This is a plain KTable query (not windowed) —
+        it always reflects the running total since startup.
+
+        `wikidatawiki` is typically 85–90% bots — Wikidata is a structured knowledge
+        graph constantly updated by automated processes.
+
+        `botRatioPct` is rounded to 2 decimal places (e.g. `87.43` = 87.43%).
+      operationId: getBotRatio
+      responses:
+        '200':
+          description: Bot vs human ratio per wiki, sorted by total edits descending
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BotRatioResponse'
+              example:
+                - wiki: wikidatawiki
+                  totalEdits: 14823
+                  botEdits: 13201
+                  humanEdits: 1622
+                  botRatioPct: 89.06
+                - wiki: enwiki
+                  totalEdits: 3241
+                  botEdits: 187
+                  humanEdits: 3054
+                  botRatioPct: 5.77
+        '503':
+          $ref: '#/components/responses/StoreNotReady'
+
+components:
+
+  schemas:
+
+    HealthResponse:
+      type: object
+      required: [status, streamsState]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: "`ok` when Kafka Streams is running or rebalancing"
+        streamsState:
+          type: string
+          description: Raw Kafka Streams state machine state
+          example: RUNNING
+
+    EditCountResponse:
+      type: object
+      required: [wiki, windowStartIso, windowEndIso, editCount]
+      properties:
+        wiki:
+          type: string
+          description: Wiki database name
+          example: enwiki
+        windowStartIso:
+          type: string
+          format: date-time
+          description: Inclusive start of the 1-minute tumbling window (UTC)
+          example: "2026-07-13T00:29:00Z"
+        windowEndIso:
+          type: string
+          format: date-time
+          description: Exclusive end of the 1-minute tumbling window (UTC)
+          example: "2026-07-13T00:30:00Z"
+        editCount:
+          type: integer
+          format: int64
+          description: Number of article-space edits in this window
+          example: 62
+
+    HotPageResponse:
+      type: object
+      required: [wiki, title, editCount, windowStartIso, windowEndIso]
+      properties:
+        wiki:
+          type: string
+          example: enwiki
+        title:
+          type: string
+          description: Article page title
+          example: 2026 FIFA World Cup
+        editCount:
+          type: integer
+          format: int64
+          description: Number of edits in this hopping window
+          example: 4
+        windowStartIso:
+          type: string
+          format: date-time
+          example: "2026-07-13T00:25:00Z"
+        windowEndIso:
+          type: string
+          format: date-time
+          example: "2026-07-13T00:30:00Z"
+
+    BotRatioResponse:
+      type: object
+      required: [wiki, totalEdits, botEdits, humanEdits, botRatioPct]
+      properties:
+        wiki:
+          type: string
+          example: wikidatawiki
+        totalEdits:
+          type: integer
+          format: int64
+          description: Total edits processed since pipeline start
+          example: 14823
+        botEdits:
+          type: integer
+          format: int64
+          example: 13201
+        humanEdits:
+          type: integer
+          format: int64
+          example: 1622
+        botRatioPct:
+          type: number
+          format: double
+          description: Percentage of edits made by bots (0–100, 2 decimal places)
+          example: 89.06
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: State stores not ready yet — pipeline may still be starting up
+
+  responses:
+    StoreNotReady:
+      description: Kafka Streams state stores not yet available — retry after startup completes
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
