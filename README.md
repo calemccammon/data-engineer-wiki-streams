@@ -17,9 +17,6 @@ cd data-engineer-wiki-streams
 # Start Redpanda and Redpanda Console
 docker compose up -d
 
-# The wrapper script is committed without the executable bit
-chmod +x gradlew
-
 # Build and run the producer, the stream processor and the API
 ./gradlew run
 ```
@@ -41,7 +38,7 @@ The defaults work with the provided `docker-compose.yml`. Each setting is read f
 | `KAFKA_STREAMS_APP_ID` | `wiki-streams-processor` | Kafka Streams application id |
 | `STATE_DIR` | `<java.io.tmpdir>/kafka-streams/wiki-streams` | Local state store directory |
 | `WIKIMEDIA_SSE_URL` | `https://stream.wikimedia.org/v2/stream/recentchange` | Source feed |
-| `API_PORT` | `8090` | HTTP port |
+| `API_PORT` | `8090` | HTTP port. A value that is not a valid port number is logged and replaced by the default |
 
 ## How it works
 
@@ -108,7 +105,7 @@ All endpoints are under `/api` and return JSON. The data endpoints read the loca
 | `GET /api/health` | `status` (`ok` while Kafka Streams is running or rebalancing, otherwise `degraded`) and the raw `streamsState` |
 | `GET /api/stats` | One row per wiki per 1-minute window for the windows that started in the last 2 minutes, sorted by `editCount` descending |
 | `GET /api/stats/{wiki}` | The 1-minute windows of one wiki that started in the last 5 minutes |
-| `GET /api/hot-pages?limit=N` | The most-edited pages, sorted by `editCount` descending. `limit` defaults to 20 |
+| `GET /api/hot-pages?limit=N` | The most-edited pages, sorted by `editCount` descending. `limit` defaults to 20 and is clamped to the range 1 to 100 |
 | `GET /api/bot-ratio` | Cumulative `totalEdits`, `botEdits`, `humanEdits` and `botRatioPct` per wiki, sorted by `totalEdits` descending |
 
 `/api/hot-pages` reads every hopping window that started in the last 5 minutes and reports, for each page, the window with the highest count. Both `/api/stats` endpoints include the window that is still open, so its count is partial.
@@ -163,7 +160,7 @@ Both the producer and the topology catch parse failures, log them at debug level
 
 ### The topology repeats the producer's filter
 
-The type and namespace filter runs in the producer and again in the topology. The aggregates are therefore the same for any contents of `wiki.raw-edits`, including records written by another client.
+The type and namespace filter, `WikiEdit.isArticleEdit`, runs in the producer and again in the topology. The aggregates are therefore the same for any contents of `wiki.raw-edits`, including records written by another client.
 
 ## Testing
 
@@ -171,7 +168,7 @@ The type and namespace filter runs in the producer and again in the topology. Th
 ./gradlew test
 ```
 
-There are 19 tests and none of them needs a broker. CI runs them on every push and pull request to `main` (`.github/workflows/test.yml`).
+There are 25 tests and none of them needs a broker. CI runs them on every push and pull request to `main` (`.github/workflows/test.yml`).
 
 `WikiTopologyTest` (7 tests) runs the whole topology in `TopologyTestDriver`, pipes records with explicit timestamps and reads the state stores:
 
@@ -185,9 +182,11 @@ There are 19 tests and none of them needs a broker. CI runs them on every push a
 | hot pages counted per page | A page edited 3 times has a hopping-window count of at least 3 |
 | malformed JSON dropped | An invalid record is skipped and the valid one is still counted |
 
-`WikiProducerTest` (12 tests) covers deserialization of `WikiEdit` (field mapping, the bot flag, unknown fields ignored) and the forwarding rule for event types and namespaces. The forwarding tests run against a copy of the rule defined in the test class, not against `WikiProducer` itself, because the rule is inline in the producer's read loop.
+`WikiProducerTest` (12 tests) covers deserialization of `WikiEdit` (field mapping, the bot flag, unknown fields ignored) and the forwarding rule for event types and namespaces. The forwarding tests call `WikiEdit.isArticleEdit`, the rule that both the producer and the topology apply. The producer's SSE read loop itself is not tested.
 
-The API routes, the output topic and window-boundary behaviour are not covered by tests.
+`ApiParamsTest` (6 tests) covers the parsing of the `limit` query parameter and of `API_PORT`: defaults, valid values, clamping and invalid input.
+
+The API route handlers, the output topic and window-boundary behaviour are not covered by tests.
 
 ## Limitations
 
@@ -197,9 +196,7 @@ The API routes, the output topic and window-boundary behaviour are not covered b
 - The bot ratio is cumulative for as long as the application's state exists. It has no window and no reset.
 - Records on `wiki.edit-stats` carry the wiki and the count but not the window they belong to.
 - The API queries only local state stores. Running more than one instance of the application would require routing each query to the instance that holds the key.
-- `limit` on `/api/hot-pages` is not validated. `docs/openapi.yaml` documents a range of 1 to 100 that the code does not enforce.
 - CORS allows any host, and there is no authentication. The service is intended for local use.
-- `EditStats`, `PageEditCount` and `EditLength.delta` in `models/WikiEdit.kt` are not used by the topology or the API.
 
 ## Data source
 

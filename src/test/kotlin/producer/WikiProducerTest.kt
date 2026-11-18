@@ -38,14 +38,10 @@ class WikiProducerTest {
         }
     """.trimIndent()
 
-    private fun shouldForward(raw: String): Boolean {
-        val edit = try {
-            json.decodeFromString<WikiEdit>(raw)
-        } catch (e: Exception) {
-            return false
-        }
-        return edit.type in setOf("edit", "new") && edit.namespace == 0
-    }
+    // Parses the raw event and applies WikiEdit.isArticleEdit, the same rule
+    // WikiProducer and WikiTopology use to decide what to keep.
+    private fun shouldForward(raw: String): Boolean =
+        json.decodeFromString<WikiEdit>(raw).isArticleEdit
 
     // ── Parsing tests ─────────────────────────────────────────────────────────
 

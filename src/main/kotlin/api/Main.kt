@@ -14,6 +14,22 @@ import streams.StreamsApp
 
 private val log = KotlinLogging.logger {}
 
+const val DEFAULT_API_PORT = 8090
+
+/**
+ * Parses the API_PORT setting. An unset value gives the default port. A value
+ * that is not a valid port number is logged and also gives the default port.
+ */
+internal fun resolvePort(raw: String?): Int {
+    if (raw.isNullOrBlank()) return DEFAULT_API_PORT
+    val port = raw.trim().toIntOrNull()?.takeIf { it in 1..65535 }
+    if (port == null) {
+        log.warn { "Ignoring invalid API_PORT '$raw' — using $DEFAULT_API_PORT" }
+        return DEFAULT_API_PORT
+    }
+    return port
+}
+
 /**
  * Application entry point.
  *
@@ -44,7 +60,11 @@ fun main() {
             try {
                 WikiProducer().run()
             } catch (e: CancellationException) {
-                break
+                // Stop on shutdown. A cancellation raised inside the HTTP client
+                // while this coroutine is still active is treated as a dropped connection.
+                if (!isActive) break
+                log.warn { "Producer connection cancelled — reconnecting in 5s: ${e.message}" }
+                delay(5_000)
             } catch (e: Exception) {
                 log.warn { "Producer error — reconnecting in 5s: ${e.message}" }
                 delay(5_000)
@@ -53,7 +73,7 @@ fun main() {
     }
 
     // Start the Ktor REST API server
-    val port = System.getenv("API_PORT")?.toInt() ?: 8090
+    val port = resolvePort(System.getenv("API_PORT"))
     val server = embeddedServer(Netty, port = port) {
         install(ContentNegotiation) {
             json(Json {

@@ -94,7 +94,7 @@ class WikiProducer(
                             buffer.clear()
 
                             val edit = tryParse(raw)
-                            if (edit == null || edit.type !in setOf("edit", "new") || edit.namespace != 0) {
+                            if (edit == null || !edit.isArticleEdit) {
                                 skipped++
                             } else {
                                 // Key by wiki so Kafka Streams can aggregate per-wiki without shuffle
@@ -113,6 +113,7 @@ class WikiProducer(
             }
         } catch (e: CancellationException) {
             log.info { "WikiProducer cancelled — shutting down" }
+            throw e
         } catch (e: Exception) {
             log.error(e) { "SSE stream error — will reconnect" }
             throw e

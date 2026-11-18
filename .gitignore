@@ -14,9 +14,6 @@ out/
 # Environment
 .env
 
-# Kafka Streams local state stores
-/tmp/kafka-streams/
-
 # OS
 .DS_Store
 Thumbs.db

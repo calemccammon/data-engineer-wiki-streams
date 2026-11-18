@@ -7,7 +7,6 @@ import io.ktor.server.plugins.statuspages.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import models.BotRatioState
 import org.apache.kafka.streams.KafkaStreams
 import org.apache.kafka.streams.errors.InvalidStateStoreException
@@ -18,7 +17,17 @@ import streams.WikiTopology
 import java.time.Instant
 
 private val logger = KotlinLogging.logger {}
-private val json = Json { ignoreUnknownKeys = true }
+
+const val HOT_PAGES_DEFAULT_LIMIT = 20
+const val HOT_PAGES_MAX_LIMIT = 100
+
+/**
+ * Parses the `limit` query parameter of /api/hot-pages. A missing or non-numeric
+ * value gives the default. Other values are clamped to 1..HOT_PAGES_MAX_LIMIT,
+ * the range documented in docs/openapi.yaml.
+ */
+internal fun parseHotPagesLimit(raw: String?): Int =
+    (raw?.toIntOrNull() ?: HOT_PAGES_DEFAULT_LIMIT).coerceIn(1, HOT_PAGES_MAX_LIMIT)
 
 // ── Response DTOs ─────────────────────────────────────────────────────────────
 
@@ -60,8 +69,8 @@ data class HealthResponse(val status: String, val streamsState: String)
  * RocksDB state stores — no round-trip to Kafka, no external database needed.
  *
  * GET /api/health       — liveness check
- * GET /api/stats        — edit counts per wiki in the current 1-min tumbling window
- * GET /api/stats/{wiki} — edit counts for a specific wiki
+ * GET /api/stats        — edit counts per wiki for the 1-min windows started in the last 2 minutes
+ * GET /api/stats/{wiki} — edit counts for one wiki for the 1-min windows started in the last 5 minutes
  * GET /api/hot-pages    — most-edited article pages in the last 5 minutes
  * GET /api/bot-ratio    — running bot vs human edit ratio per wiki
  */
@@ -93,7 +102,8 @@ fun Application.configureRoutes(streams: KafkaStreams) {
             // ── Edit counts (tumbling 1-min window) ───────────────────────────
             //
             // Queries the windowed state store for all keys in a time range.
-            // Returns counts for the most recent completed 1-minute window.
+            // Returns one row per wiki per window for every window that started in
+            // the last 2 minutes, including the window that is still open.
             get("/stats") {
                 val store: ReadOnlyWindowStore<String, Long> = streams.store(
                     org.apache.kafka.streams.StoreQueryParameters.fromNameAndType(
@@ -148,10 +158,10 @@ fun Application.configureRoutes(streams: KafkaStreams) {
 
             // ── Hot pages (hopping 5-min window) ──────────────────────────────
             //
-            // Returns the top 20 most-edited article pages in the last 5 minutes.
+            // Returns the most-edited article pages in the last 5 minutes (default 20, at most 100).
             // Key format in the store: "wiki|page title"
             get("/hot-pages") {
-                val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 20
+                val limit = parseHotPagesLimit(call.request.queryParameters["limit"])
                 val store: ReadOnlyWindowStore<String, Long> = streams.store(
                     org.apache.kafka.streams.StoreQueryParameters.fromNameAndType(
                         WikiTopology.STORE_HOT_PAGES,
