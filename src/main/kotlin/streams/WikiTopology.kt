@@ -47,7 +47,7 @@ private val log = KotlinLogging.logger {}
  *       ├─ filter(type == "edit" or "new", namespace == 0)
  *       │
  *       ├─ groupBy(wiki)
- *       │     └─ tumblingWindow(1 min) → count → KTable → wiki-edit-counts topic
+ *       │     └─ tumblingWindow(1 min) → count → KTable → wiki.edit-stats topic
  *       │
  *       ├─ groupBy(wiki + title)
  *       │     └─ hoppingWindow(5 min, advance 1 min) → count → KTable (hot-pages store)
@@ -84,7 +84,7 @@ object WikiTopology {
             .mapValues { raw -> tryParse(raw) }
             .filter { _, edit -> edit != null }
             .mapValues { edit -> edit!! }
-            .filter { _, edit -> edit.type in setOf("edit", "new") && edit.namespace == 0 }
+            .filter { _, edit -> edit.isArticleEdit }
 
         // ── Branch 1: Tumbling 1-minute edit count per wiki ───────────────────
         //

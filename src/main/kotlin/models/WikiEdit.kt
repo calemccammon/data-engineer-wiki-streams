@@ -43,51 +43,27 @@ data class WikiEdit(
 
     /** Page length before and after the edit */
     val length: EditLength? = null,
-)
+) {
+    /**
+     * True for the events the pipeline counts: edits and page creations in the
+     * article namespace. Used by both the producer and the topology.
+     */
+    val isArticleEdit: Boolean get() = type in ARTICLE_EDIT_TYPES && namespace == 0
+}
+
+private val ARTICLE_EDIT_TYPES = setOf("edit", "new")
 
 @Serializable
 data class EditLength(
     val old: Int? = null,
     val new: Int? = null,
-) {
-    /** Byte delta of the edit (+N or -N). Null if either side is unknown. */
-    val delta: Int? get() = if (old != null && new != null) new - old else null
-}
+)
 
 // ─── Aggregation result models ────────────────────────────────────────────────
 
 /**
- * Aggregated edit statistics for a single wiki within a time window.
- * Written to the `wiki-edit-stats` Kafka topic by the Streams topology.
- */
-@Serializable
-data class EditStats(
-    val wiki: String,
-    val windowStartMs: Long,
-    val windowEndMs: Long,
-    val editCount: Long,
-    val botEdits: Long,
-    val humanEdits: Long,
-    val uniqueEditors: Long,
-) {
-    val botRatio: Double get() = if (editCount > 0) botEdits.toDouble() / editCount else 0.0
-}
-
-/**
- * A single page's edit count within a hopping window — used to identify hot pages.
- */
-@Serializable
-data class PageEditCount(
-    val wiki: String,
-    val title: String,
-    val windowStartMs: Long,
-    val windowEndMs: Long,
-    val editCount: Long,
-)
-
-/**
  * Running bot-vs-human ratio for a wiki — updated on every edit.
- * Stored in the `bot-ratio` state store.
+ * Stored in the `bot-ratio-store` state store.
  */
 @Serializable
 data class BotRatioState(

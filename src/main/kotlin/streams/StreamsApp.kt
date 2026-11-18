@@ -45,8 +45,6 @@ class StreamsApp(
         return _streams
     }
 
-    fun getStreams(): KafkaStreams = _streams
-
     fun stop() {
         if (::_streams.isInitialized) {
             _streams.close()

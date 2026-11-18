@@ -1,152 +1,125 @@
-# 📡 Wikipedia Streams
+# Wikipedia Streams
 
-> A real-time Kafka Streams pipeline in **Kotlin** — ingesting live Wikipedia edit events via Server-Sent Events, processing them through stateful windowed topologies, and serving analytics through a REST API.
+A Kafka Streams application in Kotlin that reads the public Wikimedia recent-changes feed, aggregates article edits in windowed state stores, and serves the results from a Ktor REST API. The producer, the stream processor and the API run in one JVM process against a local Redpanda broker.
 
-**Data flows:** Wikimedia SSE → Kafka (Redpanda) → Kafka Streams (Kotlin) → Ktor REST API
+API reference (Swagger UI, generated from `docs/openapi.yaml`): https://calemccammon.github.io/data-engineer-wiki-streams/
 
-📖 **[API Documentation (Swagger UI)](https://calemccammon.github.io/data-engineer-wiki-streams/)**
+The hosted page is documentation only. The API itself runs locally.
 
----
+## Running it
 
-## What This Project Demonstrates
+Prerequisites: Docker with Compose, and JDK 21 or newer. Gradle does not need to be installed because the wrapper is in the repository.
 
-This is the **JVM/Kotlin chapter** of a data engineering portfolio. It explores concepts that are either impossible or impractical in the Python-based streaming world:
+```bash
+git clone https://github.com/calemccammon/data-engineer-wiki-streams.git
+cd data-engineer-wiki-streams
 
-| Concept | How It's Shown Here |
-|---|---|
-| **Kafka Streams topology DSL** | Declarative stream processing DAG — not a polling loop |
-| **KTables** | Changelog-backed materialized views representing current state per key |
-| **Tumbling windows** | Non-overlapping 1-minute buckets for edit velocity per wiki |
-| **Hopping windows** | Overlapping 5-minute windows for "hot pages right now" |
-| **RocksDB state stores** | Framework-managed persistent local state — no external database |
-| **Interactive queries** | Query in-process state stores directly via REST, no Kafka round-trip |
-| **SSE ingestion** | Server-Sent Events — simpler than WebSocket for unidirectional feeds |
-| **Kotlinx.serialization** | Type-safe JSON with compile-time serialization |
-| **TopologyTestDriver** | Unit test stream topologies without a running Kafka cluster |
-| **Exactly-once semantics** | Transactional processing guarantee via `EXACTLY_ONCE_V2` |
+# Start Redpanda and Redpanda Console
+docker compose up -d
 
----
+# Build and run the producer, the stream processor and the API
+./gradlew run
+```
 
-## Architecture
+On startup the process starts Kafka Streams, waits up to 30 seconds for it to reach `RUNNING` or `REBALANCING`, then starts the Wikimedia producer and the HTTP server on port 8090. Until the state stores are queryable, the data endpoints return `503` with a JSON error body.
+
+Redpanda Console is available at http://localhost:8080 for inspecting the topics.
+
+![Redpanda Console showing live wiki.raw-edits messages](docs/redpanda-console.png)
+
+### Configuration
+
+The defaults work with the provided `docker-compose.yml`. Each setting is read from an environment variable. `.env.example` lists them, but the application does not load a `.env` file, so the variables have to be exported in the shell that runs Gradle.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:19092` | Broker address |
+| `KAFKA_TOPIC_RAW_EDITS` | `wiki.raw-edits` | Input topic |
+| `KAFKA_STREAMS_APP_ID` | `wiki-streams-processor` | Kafka Streams application id |
+| `STATE_DIR` | `<java.io.tmpdir>/kafka-streams/wiki-streams` | Local state store directory |
+| `WIKIMEDIA_SSE_URL` | `https://stream.wikimedia.org/v2/stream/recentchange` | Source feed |
+| `API_PORT` | `8090` | HTTP port. A value that is not a valid port number is logged and replaced by the default |
+
+## How it works
 
 ```
 Wikimedia SSE stream (stream.wikimedia.org/v2/stream/recentchange)
-  ~1000 edits/minute across all languages — free, no API key
         │
         ▼
-  WikiProducer.kt (Ktor SSE client, Kotlin coroutine)
-  Filters: article-space edits only (namespace = 0)
-  Key: wiki name (e.g. "enwiki") — enables per-wiki aggregation without shuffle
+  WikiProducer.kt (Ktor CIO client in a coroutine)
+  Keeps: type "edit" or "new", namespace 0 (articles)
+  Key: wiki name (e.g. "enwiki"), value: the raw event JSON
         │
         ▼
-  Kafka topic: wiki.raw-edits  (Redpanda, Docker)
+  Kafka topic: wiki.raw-edits  (Redpanda in Docker)
         │
         ▼
   WikiTopology.kt (Kafka Streams)
   ┌─────────────────────────────────────────────────────────────────┐
-  │  KStream<wiki, WikiEdit>                                        │
+  │  KStream<wiki, WikiEdit>  (parsed, same filter applied again)   │
   │       │                                                         │
-  │       ├── groupByKey → tumblingWindow(1 min)                    │
-  │       │     └─► KTable: edit counts per wiki/minute             │
+  │       ├── groupByKey → tumbling window (1 min)                  │
+  │       │     └─► count per wiki per minute                       │
   │       │         State store: "edit-counts-store"                │
+  │       │         Also written to topic "wiki.edit-stats"         │
   │       │                                                         │
-  │       ├── selectKey(wiki|title) → hoppingWindow(5min, 1min)     │
-  │       │     └─► KTable: edit counts per page (last 5 min)       │
+  │       ├── selectKey(wiki|title) → hopping window (5 min, 1 min) │
+  │       │     └─► count per page                                  │
   │       │         State store: "hot-pages-store"                  │
   │       │                                                         │
   │       └── groupByKey → aggregate(BotRatioState)                 │
-  │             └─► KTable: running bot vs human ratio per wiki     │
+  │             └─► running bot and total edit counts per wiki      │
   │                 State store: "bot-ratio-store"                  │
   └─────────────────────────────────────────────────────────────────┘
         │
         ▼
-  Ktor REST API (port 8090)
-  GET /api/health        — pipeline liveness
-  GET /api/stats         — edit counts across all wikis (last 2 min)
-  GET /api/stats/{wiki}  — edit counts for a specific wiki
-  GET /api/hot-pages     — most-edited articles in the last 5 minutes
-  GET /api/bot-ratio     — cumulative bot vs human split per wiki
+  Ktor REST API (port 8090), reading the state stores in-process
 ```
 
----
+### Ingestion
 
-## Tech Stack
+`WikiProducer` opens one long-lived HTTP GET to the Wikimedia feed and reads it line by line. It collects `data: ` lines until a blank line ends the event, parses the JSON into `WikiEdit`, and forwards the original JSON string to Kafka if the event is an article-space edit or page creation. Events that fail to parse are counted as skipped. The Kafka producer is idempotent with `acks=all`. The producer does not use an SSE client library. If the connection fails, `Main.kt` waits 5 seconds and starts a new producer. If the server closes the stream normally, it reconnects immediately.
 
-| Layer | Tool |
+### Stream processing
+
+The topology parses each record, drops anything that does not parse, and applies the same type and namespace filter as the producer. It then feeds three aggregations.
+
+| Store | Type | Key | Window | Value |
+|---|---|---|---|---|
+| `edit-counts-store` | window store | wiki | 1-minute tumbling, no grace period | edit count |
+| `hot-pages-store` | window store | `wiki\|title` | 5-minute hopping, advancing by 1 minute, 30-second grace period | edit count |
+| `bot-ratio-store` | key-value store | wiki | none (cumulative) | `BotRatioState` (total and bot edit counts) |
+
+With the hopping window, each edit is counted in five overlapping windows. An edit at 10:00:45 falls in `[09:56, 10:01)`, `[09:57, 10:02)`, and so on up to `[10:00, 10:05)`.
+
+The stores use the Kafka Streams default, which is RocksDB on local disk with a changelog topic in Kafka. The per-minute counts are also written to the topic `wiki.edit-stats`, keyed by wiki with the count as a string.
+
+Kafka Streams runs with `processing.guarantee=exactly_once_v2` and a 1-second commit interval. If a stream thread dies with an uncaught exception, the handler replaces the thread.
+
+### API
+
+All endpoints are under `/api` and return JSON. The data endpoints read the local state stores through the Kafka Streams interactive query API (`KafkaStreams.store(...)`).
+
+| Endpoint | Returns |
 |---|---|
-| Language | Kotlin 2.0 (JVM 21) |
-| Build | Gradle with Kotlin DSL |
-| Message broker | Redpanda (Kafka-compatible) via Docker Compose |
-| SSE ingestion | Ktor client (CIO engine) |
-| Stream processing | Apache Kafka Streams 3.8 |
-| State stores | RocksDB (embedded in Kafka Streams) |
-| REST API | Ktor server (Netty engine) |
-| Serialization | Kotlinx.serialization |
-| Logging | kotlin-logging + Logback |
-| Tests | JUnit 5 + kafka-streams-test-utils |
+| `GET /api/health` | `status` (`ok` while Kafka Streams is running or rebalancing, otherwise `degraded`) and the raw `streamsState` |
+| `GET /api/stats` | One row per wiki per 1-minute window for the windows that started in the last 2 minutes, sorted by `editCount` descending |
+| `GET /api/stats/{wiki}` | The 1-minute windows of one wiki that started in the last 5 minutes |
+| `GET /api/hot-pages?limit=N` | The most-edited pages, sorted by `editCount` descending. `limit` defaults to 20 and is clamped to the range 1 to 100 |
+| `GET /api/bot-ratio` | Cumulative `totalEdits`, `botEdits`, `humanEdits` and `botRatioPct` per wiki, sorted by `totalEdits` descending |
 
----
-
-## Setup
-
-**Prerequisites:** Docker Desktop, JDK 21+ — no Gradle install needed (the wrapper `./gradlew` is included)
+`/api/hot-pages` reads every hopping window that started in the last 5 minutes and reports, for each page, the window with the highest count. Both `/api/stats` endpoints include the window that is still open, so its count is partial.
 
 ```bash
-# 1. Enter the project
-cd repositories/data-engineer-wiki-streams
-
-# 2. Start Kafka (Redpanda)
-docker compose up -d
-
-# 3. Copy environment config (defaults work out of the box)
-copy .env.example .env   # Windows
-# cp .env.example .env   # Mac/Linux
-
-# 4. Run the pipeline (builds automatically on first run)
-./gradlew run
-```
-
----
-
-## Running the Pipeline
-
-```bash
-./gradlew run
-```
-
-This starts all three components in one process:
-- **WikiProducer** — connects to Wikimedia SSE and streams edits into Kafka
-- **Kafka Streams** — processes the topology continuously in background threads
-- **Ktor API** — serves HTTP on port 8090
-
-Allow ~15 seconds for Kafka Streams to reach `RUNNING` state on first start.
-
-**Redpanda Console** (Kafka UI): http://localhost:8080
-
-![Redpanda Console showing live wiki.raw-edits messages](docs/redpanda-console.png)
-
----
-
-## API Examples
-
-```bash
-# Health check
 curl http://localhost:8090/api/health
-
-# Edit velocity across all wikis (last 2 minutes)
-curl http://localhost:8090/api/stats | jq .
-
-# Edit velocity for English Wikipedia specifically
-curl http://localhost:8090/api/stats/enwiki | jq .
-
-# Most edited articles in the last 5 minutes
-curl http://localhost:8090/api/hot-pages | jq .
-
-# Bot vs human edit ratio per wiki
-curl http://localhost:8090/api/bot-ratio | jq .
+curl http://localhost:8090/api/stats
+curl http://localhost:8090/api/stats/enwiki
+curl "http://localhost:8090/api/hot-pages?limit=5"
+curl http://localhost:8090/api/bot-ratio
 ```
 
-Sample `/api/hot-pages` response:
+The shape of a `/api/hot-pages` response, with illustrative values:
+
 ```json
 [
   {
@@ -159,72 +132,72 @@ Sample `/api/hot-pages` response:
 ]
 ```
 
----
+### Versions
 
-## Tests
+| Component | Version |
+|---|---|
+| Kotlin | 2.0.21, JVM target 21 |
+| Gradle (wrapper) | 8.10 |
+| Kafka Streams and clients | 3.8.0 |
+| Ktor (CIO client, Netty server) | 2.3.12 |
+| kotlinx-serialization-json | 1.7.3 |
+| JUnit Jupiter, kafka-streams-test-utils | 5.11.3, 3.8.0 |
+| Redpanda, Redpanda Console | `latest` image tags (not pinned) |
+
+## Design decisions
+
+### Records are keyed by wiki at the producer
+
+The per-wiki edit counts and the bot ratio group by the existing key, so Kafka Streams does not need a repartition topic for them. The hot-pages aggregation changes the key to `wiki|title`, which does cause a repartition.
+
+### The API reads state stores in-process instead of a database
+
+The aggregates already live in the Kafka Streams state stores, so the API queries them directly and the project has no separate database to run. This is also why the producer, the topology and the API share one process: the interactive query API only reaches stores held by the local `KafkaStreams` instance.
+
+### Malformed input is dropped
+
+Both the producer and the topology catch parse failures, log them at debug level and skip the record. A record that fails to parse therefore cannot stop a stream thread.
+
+### The topology repeats the producer's filter
+
+The type and namespace filter, `WikiEdit.isArticleEdit`, runs in the producer and again in the topology. The aggregates are therefore the same for any contents of `wiki.raw-edits`, including records written by another client.
+
+## Testing
 
 ```bash
 ./gradlew test
 ```
 
-**16 tests, no Kafka broker required:**
+There are 25 tests and none of them needs a broker. CI runs them on every push and pull request to `main` (`.github/workflows/test.yml`).
 
-**Topology tests** (`WikiTopologyTest`) — use `TopologyTestDriver` to test the full stream processing DAG in-process:
+`WikiTopologyTest` (7 tests) runs the whole topology in `TopologyTestDriver`, pipes records with explicit timestamps and reads the state stores:
 
-| Test | What it verifies |
+| Test | What it checks |
 |---|---|
-| `edit count increments` | Tumbling window counts correctly |
-| `edits in different wikis` | Per-wiki isolation in aggregations |
-| `non-article namespace filtered` | Namespace 0 filter works |
-| `log events filtered` | Only edit/new types pass |
-| `bot ratio accumulates` | BotRatioState arithmetic (40% = 2 bots / 5 total) |
-| `hot pages counted per page` | Hopping window per-page accumulation |
-| `malformed JSON dropped` | Topology survives bad input without crashing |
+| edit count increments | Five edits in one minute give a count of 5 in the tumbling window |
+| edits in different wikis | Counts are kept separately per wiki |
+| non-article namespace filtered | Namespaces 1 and 4 are not counted |
+| log events filtered | `log` and `categorize` events are not counted |
+| bot ratio accumulates | 3 human and 2 bot edits give 5 total, 2 bot, ratio 0.4 |
+| hot pages counted per page | A page edited 3 times has a hopping-window count of at least 3 |
+| malformed JSON dropped | An invalid record is skipped and the valid one is still counted |
 
-**Producer tests** (`WikiProducerTest`) — test SSE event parsing and filtering logic:
+`WikiProducerTest` (12 tests) covers deserialization of `WikiEdit` (field mapping, the bot flag, unknown fields ignored) and the forwarding rule for event types and namespaces. The forwarding tests call `WikiEdit.isArticleEdit`, the rule that both the producer and the topology apply. The producer's SSE read loop itself is not tested.
 
-| Test | What it verifies |
-|---|---|
-| `valid edit event parsed` | WikiEdit deserialization |
-| `bot flag parsed` | True/false bot field |
-| `unknown extra fields ignored` | `ignoreUnknownKeys` in action |
-| `article-space edits forwarded` | type=edit, namespace=0 passes |
-| `new page events forwarded` | type=new passes |
-| `log / categorize / external filtered` | Non-edit types dropped |
-| `talk / project / user pages filtered` | Non-zero namespaces dropped |
-| `bot edits forwarded` | Bots tracked for ratio metric |
+`ApiParamsTest` (6 tests) covers the parsing of the `limit` query parameter and of `API_PORT`: defaults, valid values, clamping and invalid input.
 
----
+The API route handlers, the output topic and window-boundary behaviour are not covered by tests.
 
-## Key Concepts Explained
+## Limitations
 
-### KStream vs KTable
-A **KStream** is an unbounded log of events — every Wikipedia edit is one record. A **KTable** is a changelog-compacted view — only the latest value per key is kept, representing *current state*. Aggregations (count, sum, custom) convert a KStream into a KTable.
+- Exactly-once applies to the Kafka Streams stage only. The producer does not send `Last-Event-ID` when it reconnects, so edits published by Wikimedia during a disconnect are never ingested.
+- Windows are assigned by the Kafka record timestamp, which is the time the producer sent the record. The `timestamp` field of the edit is not used.
+- The 1-minute window has no grace period, so a record that arrives after its window has closed is discarded.
+- The bot ratio is cumulative for as long as the application's state exists. It has no window and no reset.
+- Records on `wiki.edit-stats` carry the wiki and the count but not the window they belong to.
+- The API queries only local state stores. Running more than one instance of the application would require routing each query to the instance that holds the key.
+- CORS allows any host, and there is no authentication. The service is intended for local use.
 
-### Tumbling vs Hopping Windows
-- **Tumbling (1 min):** non-overlapping buckets. An edit at 10:00:45 goes into the `[10:00, 10:01)` bucket only. Used for "how many edits happened in this specific minute."
-- **Hopping (5 min, advance 1 min):** overlapping. That same edit appears in 5 consecutive windows: `[09:56, 10:01)`, `[09:57, 10:02)`, ..., `[10:00, 10:05)`. Used for "what pages are hot *right now* (last 5 minutes)."
+## Data source
 
-### State Stores & Interactive Queries
-Kafka Streams persists aggregation state to local **RocksDB** instances. Rather than writing results to an external database and querying that, the Ktor API queries the in-process state stores directly via `streams.store(...)`. This eliminates a database dependency and gives sub-millisecond query latency.
-
-### SSE vs WebSocket
-Server-Sent Events (SSE) is a simpler HTTP/1.1 protocol for unidirectional server→client push. The client makes one HTTP GET request and reads a continuous stream of `data: {...}` lines. No handshake protocol, no binary framing — just text over a persistent HTTP connection. Wikimedia uses it for their public change feed.
-
-### Exactly-Once Semantics
-With `EXACTLY_ONCE_V2`, Kafka Streams wraps each batch of reads + state updates + output writes in a Kafka transaction. If the process crashes mid-batch, the transaction is rolled back and reprocessed — no duplicates, no data loss.
-
----
-
-## Project Comparison
-
-| | `finance-analytics` | `crypto-streaming` | **This project** |
-|---|---|---|---|
-| Language | Python | Python | **Kotlin (JVM)** |
-| Processing model | Batch (daily) | Micro-batch (30s) | **Continuous streaming** |
-| Ingestion | CSV/REST API | WebSocket | **SSE** |
-| Processing framework | dbt | Custom loop | **Kafka Streams** |
-| State management | BigQuery / DuckDB | DuckDB + Parquet | **RocksDB (embedded)** |
-| Windowing | SQL GROUP BY | Manual date_trunc | **First-class API** |
-| Serving layer | Evidence dashboard | Streamlit | **REST API** |
-| Cost | Cloud (BigQuery) | Local | **Local** |
+Edit events come from [Wikimedia EventStreams](https://stream.wikimedia.org/), the public `recentchange` feed, which needs no API key.
