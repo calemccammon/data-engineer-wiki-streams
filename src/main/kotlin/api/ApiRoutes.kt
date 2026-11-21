@@ -29,6 +29,15 @@ const val HOT_PAGES_MAX_LIMIT = 100
 internal fun parseHotPagesLimit(raw: String?): Int =
     (raw?.toIntOrNull() ?: HOT_PAGES_DEFAULT_LIMIT).coerceIn(1, HOT_PAGES_MAX_LIMIT)
 
+/**
+ * A ratio between 0 and 1 as a percentage with two decimal places: 0.4567 gives 45.67.
+ *
+ * It is rounded with arithmetic. Formatting it as text and parsing that back
+ * depends on the machine's language: where a decimal comma is used, "45,67"
+ * does not parse as a number.
+ */
+internal fun toPercent(ratio: Double): Double = Math.round(ratio * 10_000) / 100.0
+
 // ── Response DTOs ─────────────────────────────────────────────────────────────
 
 @Serializable
@@ -215,7 +224,7 @@ fun Application.configureRoutes(streams: KafkaStreams) {
                             totalEdits = state.totalEdits,
                             botEdits = state.botEdits,
                             humanEdits = state.humanEdits,
-                            botRatioPct = (state.botRatio * 100).let { "%.2f".format(it).toDouble() },
+                            botRatioPct = toPercent(state.botRatio),
                         )
                     }
                 }

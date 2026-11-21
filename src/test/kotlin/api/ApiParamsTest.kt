@@ -2,6 +2,7 @@ package api
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
+import java.util.Locale
 
 class ApiParamsTest {
 
@@ -45,5 +46,26 @@ class ApiParamsTest {
         assertEquals(8090, resolvePort("abc"))
         assertEquals(8090, resolvePort("0"))
         assertEquals(8090, resolvePort("70000"))
+    }
+
+    @Test
+    fun `a ratio becomes a percentage with two decimal places`() {
+        assertEquals(0.0, toPercent(0.0))
+        assertEquals(40.0, toPercent(0.4))
+        assertEquals(45.67, toPercent(0.45671))
+        assertEquals(45.68, toPercent(0.45675))
+        assertEquals(100.0, toPercent(1.0))
+    }
+
+    @Test
+    fun `a percentage does not depend on the machine's language`() {
+        val before = Locale.getDefault()
+        // German writes a decimal comma
+        Locale.setDefault(Locale.GERMANY)
+        try {
+            assertEquals(89.06, toPercent(0.8906))
+        } finally {
+            Locale.setDefault(before)
+        }
     }
 }

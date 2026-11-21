@@ -168,7 +168,7 @@ The type and namespace filter, `WikiEdit.isArticleEdit`, runs in the producer an
 ./gradlew test
 ```
 
-There are 25 tests and none of them needs a broker. CI runs them on every push and pull request to `main` (`.github/workflows/test.yml`).
+There are 27 tests and none of them needs a broker. CI runs them on every push and pull request to `main` (`.github/workflows/test.yml`).
 
 `WikiTopologyTest` (7 tests) runs the whole topology in `TopologyTestDriver`, pipes records with explicit timestamps and reads the state stores:
 
@@ -184,7 +184,7 @@ There are 25 tests and none of them needs a broker. CI runs them on every push a
 
 `WikiProducerTest` (12 tests) covers deserialization of `WikiEdit` (field mapping, the bot flag, unknown fields ignored) and the forwarding rule for event types and namespaces. The forwarding tests call `WikiEdit.isArticleEdit`, the rule that both the producer and the topology apply. The producer's SSE read loop itself is not tested.
 
-`ApiParamsTest` (6 tests) covers the parsing of the `limit` query parameter and of `API_PORT`: defaults, valid values, clamping and invalid input.
+`ApiParamsTest` (8 tests) covers the parsing of the `limit` query parameter and of `API_PORT` (defaults, valid values, clamping and invalid input), and the rounding of the bot ratio to a percentage, including on a machine set to a language with a decimal comma.
 
 The API route handlers, the output topic and window-boundary behaviour are not covered by tests.
 
