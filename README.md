@@ -2,6 +2,8 @@
 
 A Kafka Streams application in Kotlin that reads the public Wikimedia recent-changes feed, aggregates article edits in windowed state stores, and serves the results from a Ktor REST API. The producer, the stream processor and the API run in one JVM process against a local Redpanda broker.
 
+There is no database. The API answers from the Kafka Streams state stores through interactive queries, which is why everything shares one process. The topology keeps per-minute edit counts per wiki (tumbling window), the most-edited pages (5-minute hopping window with a grace period) and a running bot-edit ratio, with `exactly_once_v2` processing. The topology tests run the whole thing in `TopologyTestDriver`, with no broker.
+
 API reference (Swagger UI, generated from `docs/openapi.yaml`): https://calemccammon.github.io/data-engineer-wiki-streams/
 
 The hosted page is documentation only. The API itself runs locally.
@@ -168,9 +170,9 @@ The type and namespace filter, `WikiEdit.isArticleEdit`, runs in the producer an
 ./gradlew test
 ```
 
-There are 27 tests and none of them needs a broker. CI runs them on every push and pull request to `main` (`.github/workflows/test.yml`).
+None of the tests needs a broker. CI runs them on every push and pull request to `main` (`.github/workflows/test.yml`).
 
-`WikiTopologyTest` (7 tests) runs the whole topology in `TopologyTestDriver`, pipes records with explicit timestamps and reads the state stores:
+`WikiTopologyTest` runs the whole topology in `TopologyTestDriver`, pipes records with explicit timestamps and reads the state stores:
 
 | Test | What it checks |
 |---|---|
@@ -182,9 +184,9 @@ There are 27 tests and none of them needs a broker. CI runs them on every push a
 | hot pages counted per page | A page edited 3 times has a hopping-window count of at least 3 |
 | malformed JSON dropped | An invalid record is skipped and the valid one is still counted |
 
-`WikiProducerTest` (12 tests) covers deserialization of `WikiEdit` (field mapping, the bot flag, unknown fields ignored) and the forwarding rule for event types and namespaces. The forwarding tests call `WikiEdit.isArticleEdit`, the rule that both the producer and the topology apply. The producer's SSE read loop itself is not tested.
+`WikiProducerTest` covers deserialization of `WikiEdit` (field mapping, the bot flag, unknown fields ignored) and the forwarding rule for event types and namespaces. The forwarding tests call `WikiEdit.isArticleEdit`, the rule that both the producer and the topology apply. The producer's SSE read loop itself is not tested.
 
-`ApiParamsTest` (8 tests) covers the parsing of the `limit` query parameter and of `API_PORT` (defaults, valid values, clamping and invalid input), and the rounding of the bot ratio to a percentage, including on a machine set to a language with a decimal comma.
+`ApiParamsTest` covers the parsing of the `limit` query parameter and of `API_PORT` (defaults, valid values, clamping and invalid input), and the rounding of the bot ratio to a percentage, including on a machine set to a language with a decimal comma.
 
 The API route handlers, the output topic and window-boundary behaviour are not covered by tests.
 
